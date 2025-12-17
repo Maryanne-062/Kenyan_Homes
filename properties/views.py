@@ -4,6 +4,12 @@ from .models import ContactMessage, TourBooking
 from .models import User
 from django.core.mail import send_mail
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 def home(request):
     """Show the homepage"""
@@ -58,63 +64,114 @@ def submit_booking(request):
 def signup(request):
     """Handle user signup with email verification"""
     if request.method == 'POST':
-        full_name = request.POST.get('full_name')
-        email = request.POST.get('email')
-        phone = request.POST.get('phone', '')
-        username = request.POST.get('username')
-        password = request.POST.get('password')
-        password_confirm = request.POST.get('password_confirm')
+        # Get form data
+        full_name = request.POST.get('full_name', '').strip()
+        email = request.POST.get('email', '').strip().lower()
+        phone = request.POST.get('phone', '').strip()
+        username = request.POST.get('username', '').strip()
+        password = request.POST.get('password', '')
+        password_confirm = request.POST.get('password_confirm', '')
         
-        # Validation
-        if password != password_confirm:
-            messages.error(request, 'Passwords do not match!')
+        # Input validation
+        errors = []
+        
+        # Validate full name
+        if not full_name:
+            errors.append('Full name is required.')
+        elif len(full_name) < 2:
+            errors.append('Full name must be at least 2 characters long.')
+        elif len(full_name) > 200:
+            errors.append('Full name is too long.')
+        
+        # Validate email
+        if not email:
+            errors.append('Email is required.')
+        elif not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email):
+            errors.append('Please enter a valid email address.')
+        
+        # Validate username
+        if not username:
+            errors.append('Username is required.')
+        elif len(username) < 3:
+            errors.append('Username must be at least 3 characters long.')
+        elif len(username) > 100:
+            errors.append('Username is too long.')
+        elif not re.match(r'^[a-zA-Z0-9_]+$', username):
+            errors.append('Username can only contain letters, numbers, and underscores.')
+        
+        # Validate password
+        if not password:
+            errors.append('Password is required.')
+        elif len(password) < 8:
+            errors.append('Password must be at least 8 characters long.')
+        elif password != password_confirm:
+            errors.append('Passwords do not match.')
+        
+        # Validate phone (optional but format check if provided)
+        if phone and not re.match(r'^\+?[0-9\s\-()]{7,15}$', phone):
+            errors.append('Please enter a valid phone number.')
+        
+        # If validation errors, return early
+        if errors:
+            for error in errors:
+                messages.error(request, error)
             return redirect('home')
         
-        if User.objects.filter(username=username).exists():
-            messages.error(request, 'Username already exists!')
-            return redirect('home')
-        
-        if User.objects.filter(email=email).exists():
-            messages.error(request, 'Email already registered!')
-            return redirect('home')
-        
-        # Create user
-        user = User(
-            full_name=full_name,
-            email=email,
-            phone=phone,
-            username=username,
-            email_verified=False  # Not verified yet
-        )
-        user.set_password(password)
-        token = user.generate_verification_token()
-        user.save()
-        
-        # Send verification email
-        verification_url = request.build_absolute_uri(f'/verify-email/{token}/')
+        # Check for existing username or email (with try-except for race conditions)
         try:
-            send_mail(
-                subject='Verify Your Email - Kenyan Homes',
-                message=f'''
-            Hello {full_name},
-
-            Thank you for signing up at Kenyan Homes!
-
-            Please verify your email by clicking the link below:
-            {verification_url}
-
-            If you didn't create this account, please ignore this email.
-
-            Best regards,
-            The Kenyan Homes Team
-                            ''',
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
+            if User.objects.filter(username=username).exists():
+                messages.error(request, 'Username already exists!')
+                return redirect('home')
+            
+            if User.objects.filter(email=email).exists():
+                messages.error(request, 'Email already registered!')
+                return redirect('home')
+            
+            # Create user
+            user = User(
+                full_name=full_name,
+                email=email,
+                phone=phone if phone else None,
+                username=username,
+                email_verified=False  # Not verified yet
             )
-            messages.success(request, f'Account created! Please check your email ({email}) to verify your account.')
-        except:
-            messages.warning(request, 'Account created but verification email failed to send. Please contact support.')
+            user.set_password(password)
+            token = user.generate_verification_token()
+            user.save()
+            
+            # Send verification email
+            verification_url = request.build_absolute_uri(f'/verify-email/{token}/')
+            try:
+                send_mail(
+                    subject='Verify Your Email - Kenyan Homes',
+                    message=f'''Hello {full_name},
+
+Thank you for signing up at Kenyan Homes!
+
+Please verify your email by clicking the link below:
+{verification_url}
+
+If you didn't create this account, please ignore this email.
+
+Best regards,
+The Kenyan Homes Team''',
+                    from_email=settings.DEFAULT_FROM_EMAIL,
+                    recipient_list=[email],
+                    fail_silently=False,
+                )
+                messages.success(request, f'Account created! Please check your email ({email}) to verify your account.')
+            except Exception as e:
+                logger.error(f'Failed to send verification email to {email}: {str(e)}')
+                # Log detailed error for debugging
+                print(f"Email sending error: {str(e)}")  # Also print to console for visibility
+                messages.warning(request, f'Account created but verification email failed to send. Error: {str(e)}. Please check your email settings or contact support.')
+            
+        except IntegrityError as e:
+            logger.error(f'Database integrity error during signup: {str(e)}')
+            messages.error(request, 'An error occurred. Username or email may already be in use.')
+        except Exception as e:
+            logger.error(f'Unexpected error during signup: {str(e)}')
+            messages.error(request, 'An unexpected error occurred. Please try again.')
         
         return redirect('home')
     
